@@ -18,9 +18,9 @@ CREATE TABLE t AS SELECT ...;
 -- Insert by column name (not position)
 INSERT INTO t BY NAME SELECT 'val' AS col_name;
 
--- Conflict handling
-INSERT OR IGNORE INTO t VALUES (...);
-INSERT OR REPLACE INTO t VALUES (...);
+-- Conflict handling (use BY NAME here too)
+INSERT OR IGNORE INTO t BY NAME (SELECT 1 AS id, 'val' AS name);
+INSERT OR REPLACE INTO t BY NAME (SELECT 1 AS id, 'val' AS name);
 
 -- Inspect
 DESCRIBE t;                  -- schema
@@ -103,10 +103,12 @@ agg() FILTER (WHERE cond)    -- conditional aggregate
 -- Top-N functions
 max(col, n)                  -- top N values as array
 min(col, n)                  -- bottom N values as array
-arg_max(arg, val, n)         -- arg for top N vals
+arg_max(arg, val)            -- arg at max val (= max_by)
+arg_min(arg, val)            -- arg at min val (= min_by)
+arg_max(arg, val, n)         -- top N: args for highest N vals
 arg_min(arg, val, n)
-max_by(arg, val, n)
-min_by(arg, val, n)
+max_by(arg, val, n)          -- alias for arg_max
+min_by(arg, val, n)          -- alias for arg_min
 
 -- Multi-level grouping
 GROUP BY ROLLUP (a, b)       -- (a,b), (a), ()

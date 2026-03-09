@@ -69,8 +69,11 @@ SELECT 'alice@example.com' AS email, 'Alice' AS name;
 Handle constraint conflicts gracefully:
 
 ```sql
-INSERT OR IGNORE INTO users VALUES (1, 'alice');       -- skip on conflict
-INSERT OR REPLACE INTO users VALUES (1, 'alice_new');  -- overwrite on conflict
+INSERT OR IGNORE INTO users BY NAME
+    (SELECT 1 AS id, 'alice' AS name);              -- skip on conflict
+
+INSERT OR REPLACE INTO users BY NAME
+    (SELECT 1 AS id, 'alice_new' AS name);           -- overwrite on conflict
 ```
 
 ### DESCRIBE and SUMMARIZE
@@ -185,14 +188,9 @@ SELECT * FROM large_table LIMIT 10%;
 **Eliminates subqueries for filtering by window functions.** `QUALIFY` is to window functions what `HAVING` is to aggregates.
 
 ```sql
--- DuckDB way (no subquery!)
+-- DuckDB way: keep the full row for each group (no subquery!)
 SELECT * FROM events
 QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) = 1;
-
--- Highest-value order per customer
-SELECT customer_id, product, amount
-FROM orders
-QUALIFY rank() OVER (PARTITION BY customer_id ORDER BY amount DESC) = 1;
 
 -- Anti-pattern (unnecessary subquery)
 SELECT * FROM (
@@ -200,6 +198,33 @@ SELECT * FROM (
     FROM events
 ) t WHERE rn = 1;
 ```
+
+### arg_max / max_by — Simplest "Best Per Group"
+When you only need specific columns (not `SELECT *`), `arg_max` is simpler than QUALIFY:
+
+```sql
+-- Best product per customer (no window function needed)
+SELECT
+    customer_id,
+    arg_max(product, amount) AS top_product,
+    max(amount) AS max_amount
+FROM orders
+GROUP BY ALL;
+
+-- Multiple values: arg_max returns the arg at the row where val is max
+-- Use max_by as an alias (identical behavior)
+SELECT
+    region,
+    max_by(product, revenue) AS top_product,
+    max_by(salesperson, revenue) AS top_seller,
+    max(revenue) AS max_revenue
+FROM sales
+GROUP BY ALL;
+```
+
+**When to use which:**
+- `arg_max` / `max_by` → need specific columns from the "best" row per group
+- `QUALIFY` → need `SELECT *` (entire row) or complex ranking logic (top-N, dense_rank, etc.)
 
 ### DISTINCT ON — One Row Per Group
 Cleaner alternative to `ROW_NUMBER() = 1` for latest-record-per-group queries:
@@ -821,7 +846,8 @@ Consult `references/anti-patterns.md` for a full list. Key ones:
 | `CASE WHEN condition THEN 1 ELSE 0 END` in SUM | `count() FILTER (WHERE condition)` |
 | Loading CSV then querying | `SELECT * FROM 'file.csv'` directly |
 | Explicit GROUP BY listing all select columns | `GROUP BY ALL` |
-| Subquery to filter window function result | `QUALIFY` clause |
+| Window subquery just to get "best" column per group | `arg_max(col, val)` / `max_by(col, val)` |
+| Subquery to filter window function result (full row) | `QUALIFY` clause |
 | `ROW_NUMBER() = 1` subquery for dedup | `DISTINCT ON (col)` |
 | Re-reading remote file in every query | `CREATE TABLE AS FROM 's3://...'` cache first |
 | `CREATE INDEX` for range scans / analytics | Automatic zonemaps handle it |
