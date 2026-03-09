@@ -277,3 +277,177 @@ GROUP BY a, b,;                         -- trailing comma OK in GROUP BY
 | CSV types | Auto-inferred from 20,480 row sample |
 | File schema | Auto-inferred for CSV, Parquet, JSON |
 | Friendly errors | Suggests similar table/column names on typos |
+
+---
+
+## QUALIFY and DISTINCT ON
+
+```sql
+-- QUALIFY: filter on window function result (no subquery needed)
+SELECT * FROM t
+QUALIFY row_number() OVER (PARTITION BY grp ORDER BY ts DESC) = 1;
+
+QUALIFY rank() OVER (ORDER BY score DESC) <= 10;
+QUALIFY sum(revenue) OVER (PARTITION BY region) > 10000;
+
+-- DISTINCT ON: one row per group
+SELECT DISTINCT ON (user_id) user_id, event_type, ts
+FROM events
+ORDER BY user_id, ts DESC;    -- ORDER BY determines which row is kept
+```
+
+---
+
+## Window Functions
+
+```sql
+-- Named WINDOW clause (reusable specs)
+SELECT avg(v) OVER w7, sum(v) OVER w30
+FROM t
+WINDOW
+    w7  AS (PARTITION BY grp ORDER BY date ROWS 6 PRECEDING),
+    w30 AS (PARTITION BY grp ORDER BY date ROWS 29 PRECEDING);
+
+-- GROUPS frame (peer-based, not row-count-based)
+avg(v) OVER (ORDER BY score GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+
+-- EXCLUDE clause
+avg(v) OVER (ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)
+-- Also: EXCLUDE GROUP, EXCLUDE TIES, EXCLUDE NO OTHERS
+
+-- fill(): linear interpolation for NULLs (DuckDB-specific)
+fill(value) OVER (ORDER BY date)
+
+-- All aggregates work as window functions
+list(product) OVER (PARTITION BY date)
+string_agg(name, ', ') OVER (ORDER BY id ROWS 3 PRECEDING)
+```
+
+---
+
+## unnest()
+
+```sql
+unnest(list_col)                          -- expand list to rows
+SELECT id, unnest(tags) AS tag FROM t;    -- one row per tag per id
+
+-- Parallel unnest (zip behavior)
+SELECT unnest(names) AS name, unnest(scores) AS score FROM t;
+```
+
+---
+
+## Struct Manipulation
+
+```sql
+-- Create
+{name: 'Alice', age: 30}                  -- struct literal
+struct_pack(name := 'Alice', age := 30)   -- named struct
+
+-- Access
+s.field_name                              -- dot notation
+s['field_name']                           -- bracket notation
+s[1]                                      -- by position (1-based)
+s.*                                       -- expand all fields to columns
+
+-- Modify
+struct_insert(s, new_field := val)        -- add field
+struct_update(s, field := new_val)        -- add or update field
+struct_concat(s1, s2)                     -- merge two structs
+
+-- Query
+struct_contains(s, 'field')              -- field exists?
+struct_keys(s)                            -- list of field names
+struct_extract(s, 'field')               -- extract by name
+```
+
+---
+
+## Vector Math (List Functions)
+
+```sql
+-- Similarity / distance (for embeddings, ML features)
+list_cosine_similarity(v1, v2)            -- range [-1, 1]
+list_cosine_distance(v1, v2)              -- 1 - cosine_similarity
+list_inner_product(v1, v2)                -- dot product
+list_distance(v1, v2)                     -- Euclidean distance
+
+-- Sorting / ranking
+list_grade_up(list)                       -- argsort (ascending index order)
+list_select(values, indices)              -- fancy indexing by index list
+
+-- Set operations
+list_intersect(l1, l2)
+list_has_all(list, sublist)               -- all elements present?
+list_has_any(list, sublist)               -- any element present?
+list_distinct(list)                       -- unique elements
+
+-- Aggregation over list elements
+list_sum(list)
+list_avg(list)
+list_min(list) / list_max(list)
+list_string_agg(list, sep)
+list_aggregate(list, 'any_agg_name')      -- apply any aggregate function
+```
+
+---
+
+## Key Datetime Functions
+
+```sql
+-- Truncate / extract
+date_trunc('month', ts)                   -- truncate to precision
+date_part('year', ts)                     -- extract component (= extract)
+extract('dow' FROM ts)                    -- day of week (0=Sun)
+
+-- Arithmetic
+DATE '2024-01-15' + 5                     -- add days (returns DATE)
+DATE '2024-01-15' + INTERVAL 5 DAY        -- add interval (returns TIMESTAMP)
+DATE '2024-01-20' - DATE '2024-01-15'     -- difference in days (integer)
+date_diff('month', d1, d2)               -- count boundaries crossed
+age(ts1, ts2)                             -- human-readable interval
+
+-- Current time
+today()  /  current_date                  -- date only
+now()    /  current_timestamp             -- with time
+
+-- Parse / format
+strptime(str, '%d/%m/%Y')                -- string → timestamp
+try_strptime(str, fmt)                   -- returns NULL instead of error
+strftime(ts, '%Y-%m-%d')                 -- timestamp → string
+
+-- Binning
+time_bucket(INTERVAL '15 minutes', ts)   -- temporal bucketing
+generate_series(d1, d2, INTERVAL 1 DAY) -- inclusive date range
+range(d1, d2, INTERVAL 1 DAY)           -- exclusive date range
+
+-- Helpers
+last_day(date)                            -- last day of month
+dayname(date)                             -- 'Monday', 'Tuesday', ...
+monthname(date)                           -- 'January', 'February', ...
+```
+
+---
+
+## CLI Quick Reference
+
+```bash
+duckdb                                    # in-memory
+duckdb mydb.duckdb                        # persistent
+duckdb -readonly mydb.duckdb              # read-only
+duckdb -c "SELECT * FROM 'f.csv' LIMIT 5" # one-liner
+duckdb -csv / -json / -markdown           # set output format
+duckdb mydb.duckdb -f script.sql          # run SQL file
+
+# Conversion
+duckdb -c "COPY (FROM 'in.csv') TO 'out.parquet' (FORMAT PARQUET)"
+duckdb -c "COPY (FROM 'in.parquet') TO 'out.csv' (HEADER)"
+
+# Pipe
+cat f.csv | duckdb -c "SELECT * FROM read_csv('/dev/stdin')"
+duckdb -csv -c "FROM t" | head -20
+```
+
+Dot commands: `.tables`, `.schema`, `.mode FORMAT`, `.timer on`, `.output file`, `.once file`, `.read file.sql`, `.edit`
+
+See `references/cli.md` for full reference.

@@ -7,7 +7,8 @@ description: >
   storage, or when a user asks about DuckDB syntax, functions, or data loading.
   Key trigger phrases: "DuckDB query", "query a CSV/Parquet/JSON file", "load data
   into DuckDB", "DuckDB syntax", "GROUP BY ALL", "FROM-first", "DuckDB import",
-  "read_csv", "read_parquet", "duckdb pivot", "duckdb lambda", "duckdb join".
+  "read_csv", "read_parquet", "duckdb pivot", "duckdb lambda", "duckdb join",
+  "duckdb cli", "duckdb shell", "convert parquet to csv", "duckdb export data".
 metadata:
   author: duckdb-friendly-sql-skill
   version: 1.0.0
@@ -178,6 +179,37 @@ GROUP BY ALL;
 ```sql
 -- Get top 10% of rows
 SELECT * FROM large_table LIMIT 10%;
+```
+
+### QUALIFY — Filter on Window Function Results
+**Eliminates subqueries for filtering by window functions.** `QUALIFY` is to window functions what `HAVING` is to aggregates.
+
+```sql
+-- DuckDB way (no subquery!)
+SELECT * FROM events
+QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) = 1;
+
+-- Highest-value order per customer
+SELECT customer_id, product, amount
+FROM orders
+QUALIFY rank() OVER (PARTITION BY customer_id ORDER BY amount DESC) = 1;
+
+-- Anti-pattern (unnecessary subquery)
+SELECT * FROM (
+    SELECT *, row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS rn
+    FROM events
+) t WHERE rn = 1;
+```
+
+### DISTINCT ON — One Row Per Group
+Cleaner alternative to `ROW_NUMBER() = 1` for latest-record-per-group queries:
+
+```sql
+-- Latest event per user (ORDER BY determines which row is kept)
+SELECT DISTINCT ON (user_id)
+    user_id, event_type, created_at
+FROM events
+ORDER BY user_id, created_at DESC;
 ```
 
 ---
@@ -450,6 +482,15 @@ FROM users SELECT users;  -- returns each row as a struct
 SELECT MAP(['key1', 'key2'], [100, 200]) AS metrics;
 ```
 
+### unnest() — Expand Lists to Rows
+```sql
+-- Flatten a list column into individual rows
+SELECT id, unnest(tags) AS tag FROM posts;
+
+-- Unnest multiple columns in parallel (row-aligned)
+SELECT order_id, unnest(items) AS item, unnest(quantities) AS qty FROM orders;
+```
+
 ---
 
 ## Step 8: Function Chaining
@@ -523,6 +564,68 @@ SELECT a.*, b.score FROM predictions a POSITIONAL JOIN actuals b;
 
 ---
 
+## Window Function Enhancements
+
+### Named WINDOW Clause
+Define reusable window specs to avoid repetition across multiple window functions:
+
+```sql
+SELECT
+    date, symbol, price,
+    avg(price) OVER w7  AS ma_7day,
+    avg(price) OVER w30 AS ma_30day,
+    sum(price) OVER w7  AS sum_7day
+FROM prices
+WINDOW
+    w7  AS (PARTITION BY symbol ORDER BY date ROWS 6 PRECEDING),
+    w30 AS (PARTITION BY symbol ORDER BY date ROWS 29 PRECEDING)
+ORDER BY symbol, date;
+```
+
+### GROUPS Frame — Peer-Based Windows
+Include all rows tied on the ORDER BY value (useful for rankings and tied scores):
+
+```sql
+SELECT name, score,
+    avg(score) OVER (ORDER BY score GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS neighborhood_avg
+FROM leaderboard;
+```
+
+### EXCLUDE Clause
+Exclude specific rows from the window frame — removes the need for `WHERE id != self` tricks:
+
+```sql
+SELECT id, value,
+    avg(value) OVER (
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        EXCLUDE CURRENT ROW   -- exclude self from the average
+    ) AS avg_of_others
+FROM data;
+-- Also: EXCLUDE GROUP (all peers), EXCLUDE TIES, EXCLUDE NO OTHERS (default)
+```
+
+### fill() — Linear Interpolation for NULLs
+DuckDB-specific function that fills NULL values via linear interpolation (extrapolates at edges):
+
+```sql
+-- Fill gaps in a sparse time series
+SELECT date, fill(price) OVER (ORDER BY date) AS interpolated_price
+FROM sparse_prices;
+```
+
+### Any Aggregate as a Window Function
+All DuckDB aggregate functions work in window context, including list aggregates:
+
+```sql
+SELECT
+    date, product, revenue,
+    list(product) OVER (PARTITION BY date) AS all_products_that_day,
+    string_agg(product, ', ') OVER (ORDER BY date ROWS 2 PRECEDING) AS recent_3_products
+FROM sales;
+```
+
+---
+
 ## Step 10: Data Types and Identifiers
 
 ### Readable Number Literals
@@ -581,6 +684,126 @@ SELECT format('{} has {} items', category, count()) FROM inventory GROUP BY ALL;
 SELECT printf('%-20s: $%.2f', name, price) FROM products;
 ```
 
+### Useful String Utilities
+```sql
+-- Filesystem path parsing (built-in, no regex needed)
+SELECT
+    parse_filename(file_path) AS filename,   -- 'report.csv'
+    parse_dirname(file_path) AS dir,         -- '/data/2024'
+    parse_dirpath(file_path) AS dirpath      -- '/data/2024/'
+FROM file_log;
+
+-- Human-readable sizes
+SELECT format_bytes(file_size_bytes) AS size FROM files;
+-- e.g. '1.5 GiB', '842.3 MiB'
+
+-- URL encoding
+SELECT url_encode('hello world & more') AS encoded;  -- 'hello+world+%26+more'
+
+-- Unicode / accent handling
+SELECT strip_accents('café naïve résumé');           -- 'cafe naive resume'
+SELECT nfc_normalize(text) FROM documents;            -- normalize Unicode form
+```
+
+---
+
+## Exploratory Analysis Workflow
+
+When working with unfamiliar data, use this sequence:
+
+### 1. Inspect the File
+```sql
+FROM sniff_csv('mystery.csv');              -- delimiter, types, sample SQL
+DESCRIBE SELECT * FROM 'data.parquet';      -- schema for any file format
+```
+
+### 2. Cache Remote or Large Files First
+**Always cache S3/GCS/HTTPS files before repeated queries.** Re-reading a remote file
+on each query wastes time and money.
+
+```sql
+-- Cache once, query many times
+CREATE OR REPLACE TABLE raw AS FROM 's3://bucket/large-dataset.parquet';
+
+-- Multi-file with different schemas
+CREATE OR REPLACE TABLE raw AS
+FROM read_parquet('s3://bucket/data/**/*.parquet', union_by_name = true);
+```
+
+### 3. Profile the Data
+```sql
+SUMMARIZE raw;   -- min, max, avg, null count, unique count per column
+
+-- Distribution of a key column
+SELECT region, count() AS n,
+    count() / sum(count()) OVER () * 100 AS pct
+FROM raw GROUP BY ALL ORDER BY n DESC;
+```
+
+### 4. Iterate on the Cached Table
+```sql
+SELECT date_trunc('month', created_at) AS month,
+    count() AS events, count(DISTINCT user_id) AS users
+FROM raw
+GROUP BY ALL
+ORDER BY month;
+```
+
+### 5. Export Results
+```sql
+COPY (SELECT * FROM raw WHERE status = 'active') TO 'active.parquet' (FORMAT PARQUET);
+COPY (FROM final_query) TO 'report.csv' (HEADER);
+```
+
+Consult `references/visualization.md` for SQL patterns to shape data for charts.
+
+---
+
+## CLI Quick Reference
+
+See `references/cli.md` for the full CLI reference. Key patterns:
+
+### One-Liner Queries
+```bash
+duckdb -c "SELECT * FROM 'data.csv' LIMIT 10"
+duckdb -c "SUMMARIZE 'large.parquet'"
+duckdb mydb.duckdb -f analysis.sql
+duckdb -readonly mydb.duckdb
+```
+
+### Data Conversion
+```bash
+# CSV → Parquet
+duckdb -c "COPY (FROM 'in.csv') TO 'out.parquet' (FORMAT PARQUET)"
+
+# Parquet → CSV
+duckdb -c "COPY (FROM 'in.parquet') TO 'out.csv' (HEADER)"
+
+# Multiple files → merged
+duckdb -c "COPY (FROM 'logs/*.csv') TO 'all.parquet' (FORMAT PARQUET)"
+```
+
+### Pipe to/from Unix Tools
+```bash
+cat data.csv | duckdb -c "SELECT * FROM read_csv('/dev/stdin') WHERE amount > 1000"
+duckdb -csv -c "SELECT * FROM 'data.parquet'" | head -20
+```
+
+### Output Formats
+```bash
+duckdb -csv       # comma-separated
+duckdb -json      # JSON array
+duckdb -markdown  # Markdown table
+```
+
+### In-Shell Settings
+```sql
+.timer on          -- show query time
+.mode markdown     -- switch output format
+.maxrows 100       -- limit displayed rows
+.once out.csv      -- next query to file
+```
+
 ---
 
 ## Common Anti-Patterns to Avoid
@@ -598,6 +821,10 @@ Consult `references/anti-patterns.md` for a full list. Key ones:
 | `CASE WHEN condition THEN 1 ELSE 0 END` in SUM | `count() FILTER (WHERE condition)` |
 | Loading CSV then querying | `SELECT * FROM 'file.csv'` directly |
 | Explicit GROUP BY listing all select columns | `GROUP BY ALL` |
+| Subquery to filter window function result | `QUALIFY` clause |
+| `ROW_NUMBER() = 1` subquery for dedup | `DISTINCT ON (col)` |
+| Re-reading remote file in every query | `CREATE TABLE AS FROM 's3://...'` cache first |
+| `CREATE INDEX` for range scans / analytics | Automatic zonemaps handle it |
 
 ---
 
@@ -704,3 +931,11 @@ Solution: DuckDB auto-renames to `col:1`, `col:2` — use `SELECT * EXCLUDE` or 
 **Error: Column alias not working in WHERE**
 Cause: Using a JOIN ON clause (not supported) vs WHERE/GROUP BY/HAVING (supported)
 Solution: Column aliases work in WHERE, GROUP BY, HAVING but NOT in JOIN ON conditions
+
+**Error: Cannot use window function result in WHERE**
+Cause: WHERE is evaluated before window functions
+Solution: Use `QUALIFY` instead — it is evaluated after window functions
+
+**Error: ART index creation fails on large table (OOM)**
+Cause: ART indexes must fit entirely in memory during creation
+Solution: Don't create indexes for analytics — DuckDB's automatic zonemaps handle range scans; ART indexes are only useful for highly selective point lookups (< 0.1% of rows)
