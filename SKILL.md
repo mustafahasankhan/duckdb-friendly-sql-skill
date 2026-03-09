@@ -178,10 +178,27 @@ FROM orders
 GROUP BY ALL;
 ```
 
-### Percentage LIMIT
+### Percentage LIMIT and SAMPLE
 ```sql
--- Get top 10% of rows
+-- Get top 10% of rows (ordered)
 SELECT * FROM large_table LIMIT 10%;
+
+-- Random sample (unordered) — great for EDA on large tables
+SELECT * FROM large_table USING SAMPLE 1000;       -- 1000 rows
+SELECT * FROM large_table USING SAMPLE 10%;         -- 10% of rows
+SELECT * FROM large_table USING SAMPLE 10% (bernoulli); -- row-level sampling
+```
+
+### SET VARIABLE — SQL-Level Variables
+```sql
+SET VARIABLE start_date = DATE '2024-01-01';
+SET VARIABLE regions = ['US', 'EU', 'APAC'];
+
+SELECT * FROM sales
+WHERE sale_date >= getvariable('start_date')
+  AND region = ANY(getvariable('regions'));
+
+RESET VARIABLE start_date;
 ```
 
 ### QUALIFY — Filter on Window Function Results
@@ -292,6 +309,26 @@ SELECT COLUMNS(* REPLACE (price::DECIMAL(10,2) AS price)) FROM catalog;
 
 -- Lambda-based selection
 SELECT COLUMNS(col -> col LIKE '%_date') FROM events;
+```
+
+### IN with Lists and ANY
+```sql
+-- IN works directly with DuckDB list values
+SET VARIABLE allowed = ['US', 'EU', 'APAC'];
+SELECT * FROM sales WHERE region = ANY(getvariable('allowed'));
+
+-- IN with a list column
+SELECT * FROM orders WHERE status IN ('pending', 'processing');
+```
+
+### CTE Column Aliases
+```sql
+-- Name CTE columns inline (no need for separate alias in body)
+WITH monthly_totals(month, revenue, orders) AS (
+    SELECT date_trunc('month', ts), sum(amount), count()
+    FROM sales GROUP BY ALL
+)
+SELECT * FROM monthly_totals WHERE revenue > 10000;
 ```
 
 ---
@@ -548,6 +585,45 @@ FROM products;
 
 ---
 
+## Macros — Reusable SQL Functions
+
+DuckDB supports scalar macros (return a value) and table macros (return a result set).
+`MACRO` and `FUNCTION` are synonyms.
+
+```sql
+-- Scalar macro
+CREATE OR REPLACE MACRO pct(x, total) AS round(100.0 * x / total, 1);
+SELECT category, count() AS n, pct(count(), sum(count()) OVER ()) AS pct
+FROM sales GROUP BY ALL;
+
+-- Table macro — parameterized queries
+CREATE OR REPLACE MACRO top_n(tbl, col, n) AS TABLE
+    FROM query_table(tbl) ORDER BY col DESC LIMIT n;
+
+FROM top_n('sales', 'revenue', 10);
+
+-- Dynamic column analysis with COLUMNS() + list_contains
+CREATE OR REPLACE MACRO summarize_cols(cols) AS TABLE
+    FROM any_cte
+    SELECT
+        min(COLUMNS(c -> list_contains(cols, c)))::VARCHAR AS min_val,
+        max(COLUMNS(c -> list_contains(cols, c)))::VARCHAR AS max_val,
+        approx_count_distinct(COLUMNS(c -> list_contains(cols, c))) AS approx_unique
+    GROUP BY ALL;
+
+-- Use: macros can reference CTEs from the calling scope
+WITH any_cte AS (FROM 'data.parquet')
+FROM summarize_cols(['price', 'category']);
+```
+
+**Key macro patterns:**
+- `COLUMNS(c -> list_contains(param, c))` — dynamically select columns by name
+- `alias(COLUMNS(*))` — get the column name as a value (useful in UNPIVOT patterns)
+- `typeof(COLUMNS(*))` — get column types at runtime
+- Macros can reference CTEs and functions defined in the calling scope
+
+---
+
 ## Step 9: Special Join Types
 
 ### ASOF Join — Time-Series Matching
@@ -579,6 +655,15 @@ LATERAL (
     ORDER BY total_spent DESC
     LIMIT 3
 ) AS top_prods;
+```
+
+### SEMI and ANTI Joins — Existence Checks Without Duplicating Rows
+```sql
+-- Keep only customers who have orders (no duplicate rows from 1:N)
+SELECT * FROM customers SEMI JOIN orders USING (customer_id);
+
+-- Keep customers with NO orders (cleaner than NOT EXISTS subquery)
+SELECT * FROM customers ANTI JOIN orders USING (customer_id);
 ```
 
 ### POSITIONAL Join — Row-by-Row
@@ -759,8 +844,12 @@ FROM read_parquet('s3://bucket/data/**/*.parquet', union_by_name = true);
 ```sql
 SUMMARIZE raw;   -- min, max, avg, null count, unique count per column
 
+-- Quick look at a large table (random sample)
+SELECT * FROM raw USING SAMPLE 1000;
+
 -- Distribution of a key column
 SELECT region, count() AS n,
+    approx_count_distinct(user_id) AS approx_users,
     count() / sum(count()) OVER () * 100 AS pct
 FROM raw GROUP BY ALL ORDER BY n DESC;
 ```
@@ -846,6 +935,7 @@ Consult `references/anti-patterns.md` for a full list. Key ones:
 | `CASE WHEN condition THEN 1 ELSE 0 END` in SUM | `count() FILTER (WHERE condition)` |
 | Loading CSV then querying | `SELECT * FROM 'file.csv'` directly |
 | Explicit GROUP BY listing all select columns | `GROUP BY ALL` |
+| `NOT EXISTS` / `NOT IN` subquery | `ANTI JOIN` (also: `SEMI JOIN` for existence) |
 | Window subquery just to get "best" column per group | `arg_max(col, val)` / `max_by(col, val)` |
 | Subquery to filter window function result (full row) | `QUALIFY` clause |
 | `ROW_NUMBER() = 1` subquery for dedup | `DISTINCT ON (col)` |

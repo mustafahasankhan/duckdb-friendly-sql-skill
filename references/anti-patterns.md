@@ -386,9 +386,29 @@ ORDER BY ALL;
 
 ---
 
+## Join Anti-Pattern: NOT EXISTS / NOT IN Instead of ANTI JOIN
+
+### Pattern 22: Subquery for Existence/Non-Existence Checks
+```sql
+-- WRONG: Verbose NOT EXISTS subquery
+SELECT * FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+
+-- WRONG: NOT IN (can have NULL pitfalls)
+SELECT * FROM customers WHERE id NOT IN (SELECT customer_id FROM orders);
+
+-- RIGHT: ANTI JOIN (clear intent, no NULL issues)
+SELECT * FROM customers ANTI JOIN orders ON customers.id = orders.customer_id;
+
+-- RIGHT: SEMI JOIN for positive existence
+SELECT * FROM customers SEMI JOIN orders ON customers.id = orders.customer_id;
+```
+
+---
+
 ## Window Function Anti-Patterns
 
-### Pattern 22: Window Function Just to Get "Best" Column Per Group
+### Pattern 23: Window Function Just to Get "Best" Column Per Group
 ```sql
 -- WRONG: Full window machinery when you only need one column from the "best" row
 SELECT customer_id, product, amount FROM (
@@ -408,7 +428,7 @@ GROUP BY ALL;
 -- Also: arg_min / min_by for the minimum
 ```
 
-### Pattern 23: Subquery to Filter Window Function Results (Full Row)
+### Pattern 24: Subquery to Filter Window Function Results (Full Row)
 ```sql
 -- WRONG: Verbose, adds an extra query layer
 SELECT * FROM (
@@ -422,7 +442,7 @@ SELECT * FROM events
 QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) = 1;
 ```
 
-### Pattern 24: ROW_NUMBER() Subquery for Latest Record Per Group
+### Pattern 25: ROW_NUMBER() Subquery for Latest Record Per Group
 ```sql
 -- WRONG: Verbose pattern for selecting one row per group
 SELECT user_id, event_type, created_at FROM (
@@ -438,7 +458,7 @@ FROM events
 ORDER BY user_id, created_at DESC;
 ```
 
-### Pattern 25: WHERE clause on window function output
+### Pattern 26: WHERE clause on window function output
 ```sql
 -- WRONG: WHERE is evaluated before window functions — this errors
 SELECT *, sum(revenue) OVER (PARTITION BY region) AS region_total
@@ -455,7 +475,7 @@ QUALIFY region_total > 10000;
 
 ## Performance Anti-Patterns
 
-### Pattern 26: Creating Indexes for Analytics Queries
+### Pattern 27: Creating Indexes for Analytics Queries
 ```sql
 -- WRONG: Adding ART indexes for range scans and aggregations
 CREATE INDEX idx_date ON events (event_date);
@@ -468,7 +488,7 @@ CREATE INDEX idx_amount ON orders (amount);
 SELECT * FROM events WHERE event_id = 12345;  -- this benefits from an index
 ```
 
-### Pattern 27: Re-Reading Remote Files on Every Query
+### Pattern 28: Re-Reading Remote Files on Every Query
 ```sql
 -- WRONG: Reading from S3/GCS/HTTPS on every query is slow and expensive
 SELECT region, count() FROM 's3://bucket/huge-dataset.parquet' GROUP BY ALL;
@@ -511,6 +531,8 @@ SELECT * FROM raw WHERE status = 'active';
 | `x AS alias` | `alias: x` (colon syntax) |
 | `FROM t SELECT c` — no | `FROM t SELECT c` — YES, works! |
 | Fixed `LIMIT 100` | `LIMIT 10%` for percentage-based |
+| `NOT EXISTS (SELECT 1 ...)` / `NOT IN` | `ANTI JOIN` |
+| `EXISTS (SELECT 1 ...)` for filtering | `SEMI JOIN` |
 | Window subquery for "best column per group" | `arg_max(col, val)` / `max_by(col, val)` |
 | Subquery to filter window function result | `QUALIFY` clause |
 | `ROW_NUMBER() = 1` subquery for dedup/latest | `DISTINCT ON (col)` |
