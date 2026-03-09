@@ -18,9 +18,9 @@ CREATE TABLE t AS SELECT ...;
 -- Insert by column name (not position)
 INSERT INTO t BY NAME SELECT 'val' AS col_name;
 
--- Conflict handling
-INSERT OR IGNORE INTO t VALUES (...);
-INSERT OR REPLACE INTO t VALUES (...);
+-- Conflict handling (use BY NAME here too)
+INSERT OR IGNORE INTO t BY NAME (SELECT 1 AS id, 'val' AS name);
+INSERT OR REPLACE INTO t BY NAME (SELECT 1 AS id, 'val' AS name);
 
 -- Inspect
 DESCRIBE t;                  -- schema
@@ -103,10 +103,12 @@ agg() FILTER (WHERE cond)    -- conditional aggregate
 -- Top-N functions
 max(col, n)                  -- top N values as array
 min(col, n)                  -- bottom N values as array
-arg_max(arg, val, n)         -- arg for top N vals
+arg_max(arg, val)            -- arg at max val (= max_by)
+arg_min(arg, val)            -- arg at min val (= min_by)
+arg_max(arg, val, n)         -- top N: args for highest N vals
 arg_min(arg, val, n)
-max_by(arg, val, n)
-min_by(arg, val, n)
+max_by(arg, val, n)          -- alias for arg_max
+min_by(arg, val, n)          -- alias for arg_min
 
 -- Multi-level grouping
 GROUP BY ROLLUP (a, b)       -- (a,b), (a), ()
@@ -137,6 +139,12 @@ t1 ASOF JOIN t2 ON t1.key = t2.key AND t1.ts >= t2.ts;
 
 -- LATERAL: correlated subquery in FROM
 FROM t1, LATERAL (SELECT ... WHERE col = t1.id) AS sub;
+
+-- SEMI: keep left rows that match (no duplicates)
+t1 SEMI JOIN t2 USING (id);
+
+-- ANTI: keep left rows with NO match
+t1 ANTI JOIN t2 USING (id);
 
 -- POSITIONAL: row-by-row match
 t1 POSITIONAL JOIN t2;
@@ -250,6 +258,34 @@ FROM 's3://bucket/path/*.parquet';
 FROM 'https://example.com/data.parquet';
 FROM 'az://container/path/*.csv';
 FROM 'gcs://bucket/data.parquet';
+```
+
+---
+
+## Variables, Sampling, Macros
+
+```sql
+-- SQL-level variables
+SET VARIABLE start_date = DATE '2024-01-01';
+SELECT * FROM t WHERE ts >= getvariable('start_date');
+RESET VARIABLE start_date;
+
+-- Random sampling
+SELECT * FROM t USING SAMPLE 1000;      -- N rows
+SELECT * FROM t USING SAMPLE 10%;       -- percentage
+
+-- CTE column aliases
+WITH cte(col_a, col_b) AS (SELECT 1, 2) FROM cte;
+
+-- Macros (MACRO and FUNCTION are synonyms)
+CREATE OR REPLACE MACRO pct(x, total) AS round(100.0 * x / total, 1);
+CREATE OR REPLACE MACRO top_n(tbl, col, n) AS TABLE
+    FROM query_table(tbl) ORDER BY col DESC LIMIT n;
+
+-- Metaprogramming
+alias(COLUMNS(*))                        -- get column name as value
+typeof(COLUMNS(*))                       -- get column type as value
+approx_count_distinct(col)               -- fast approximate unique count
 ```
 
 ---
