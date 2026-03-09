@@ -386,6 +386,85 @@ ORDER BY ALL;
 
 ---
 
+## Window Function Anti-Patterns
+
+### Pattern 22: Subquery to Filter Window Function Results
+```sql
+-- WRONG: Verbose, adds an extra query layer
+SELECT * FROM (
+    SELECT *,
+        row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS rn
+    FROM events
+) t WHERE rn = 1;
+
+-- RIGHT: QUALIFY clause (no subquery)
+SELECT * FROM events
+QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) = 1;
+```
+
+### Pattern 23: ROW_NUMBER() Subquery for Latest Record Per Group
+```sql
+-- WRONG: Verbose pattern for selecting one row per group
+SELECT user_id, event_type, created_at FROM (
+    SELECT *,
+        row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS rn
+    FROM events
+) WHERE rn = 1;
+
+-- RIGHT: DISTINCT ON
+SELECT DISTINCT ON (user_id)
+    user_id, event_type, created_at
+FROM events
+ORDER BY user_id, created_at DESC;
+```
+
+### Pattern 24: WHERE clause on window function output
+```sql
+-- WRONG: WHERE is evaluated before window functions — this errors
+SELECT *, sum(revenue) OVER (PARTITION BY region) AS region_total
+FROM sales
+WHERE region_total > 10000;   -- ERROR: column not found
+
+-- RIGHT: QUALIFY is evaluated after window functions
+SELECT *, sum(revenue) OVER (PARTITION BY region) AS region_total
+FROM sales
+QUALIFY region_total > 10000;
+```
+
+---
+
+## Performance Anti-Patterns
+
+### Pattern 25: Creating Indexes for Analytics Queries
+```sql
+-- WRONG: Adding ART indexes for range scans and aggregations
+CREATE INDEX idx_date ON events (event_date);
+CREATE INDEX idx_amount ON orders (amount);
+-- These waste memory and don't speed up analytical queries
+
+-- RIGHT: DuckDB automatically maintains zonemap (min-max) indexes on all columns
+-- They provide block-skipping for range predicates with no manual setup
+-- Only create ART indexes for highly selective point lookups (< 0.1% of rows)
+SELECT * FROM events WHERE event_id = 12345;  -- this benefits from an index
+```
+
+### Pattern 26: Re-Reading Remote Files on Every Query
+```sql
+-- WRONG: Reading from S3/GCS/HTTPS on every query is slow and expensive
+SELECT region, count() FROM 's3://bucket/huge-dataset.parquet' GROUP BY ALL;
+SELECT product, sum(revenue) FROM 's3://bucket/huge-dataset.parquet' GROUP BY ALL;
+SELECT * FROM 's3://bucket/huge-dataset.parquet' WHERE status = 'active';
+
+-- RIGHT: Cache once, query many times
+CREATE OR REPLACE TABLE raw AS FROM 's3://bucket/huge-dataset.parquet';
+-- Now query the in-memory/local table:
+SELECT region, count() FROM raw GROUP BY ALL;
+SELECT product, sum(revenue) FROM raw GROUP BY ALL;
+SELECT * FROM raw WHERE status = 'active';
+```
+
+---
+
 ## Quick Reference Card
 
 | PostgreSQL/MySQL Habit | DuckDB Equivalent |
@@ -412,3 +491,8 @@ ORDER BY ALL;
 | `x AS alias` | `alias: x` (colon syntax) |
 | `FROM t SELECT c` — no | `FROM t SELECT c` — YES, works! |
 | Fixed `LIMIT 100` | `LIMIT 10%` for percentage-based |
+| Subquery to filter window function result | `QUALIFY` clause |
+| `ROW_NUMBER() = 1` subquery for dedup/latest | `DISTINCT ON (col)` |
+| `WHERE window_fn_result = x` (errors) | `QUALIFY window_fn_result = x` |
+| `CREATE INDEX` on analytics columns | Automatic zonemaps — no index needed |
+| Re-reading `'s3://...'` on every query | `CREATE TABLE t AS FROM 's3://...'` |
